@@ -212,9 +212,21 @@ impl AstTsPrinter for (ModuleIdent, &ModuleDefinition) {
         }
 
         // functions
+        c.json = false;
+
         for (fname, fdef) in functions.key_cloned_iter() {
             (fname, fdef).write_ts(w, c)?;
         }
+
+        // function json
+        c.json = true;
+        w.writeln("export const json = {");
+
+        for (fname, fdef) in functions.key_cloned_iter() {
+            (fname, fdef).write_ts(w, c)?;
+        }
+
+        w.writeln("};");
 
         // validate show directives
         validate_show_functions(functions, c)?;
@@ -668,6 +680,28 @@ pub fn write_parameters(
     Ok(())
 }
 
+pub fn write_parameters_json(
+    sig: &FunctionSignature,
+    w: &mut TsgenWriter,
+    c: &mut Context,
+    skip_signer: bool,
+) -> WriteResult {
+    w.increase_indent();
+    for (name, ty) in &sig.parameters {
+        if skip_signer && is_type_signer(ty) {
+            continue;
+        }
+        w.writeln(format!(
+            "\"{}\": \"{}\",",
+            rename(name),
+            single_type_to_tstype(ty, c)?
+        ));
+    }
+    w.decrease_indent();
+
+    Ok(())
+}
+
 pub fn handle_function_cmd_directive(
     fname: &FunctionName,
     f: &Function,
@@ -733,152 +767,137 @@ impl AstTsPrinter for (FunctionName, &Function) {
     fn write_ts(&self, w: &mut TsgenWriter, c: &mut Context) -> WriteResult {
         let (name, func) = self;
         let is_entry = func.entry.is_some();
-        if c.config.test {
-            let is_test = check_test(name, func, c)?;
-            if is_test {
-                w.writeln("// #[test]");
-            }
-        }
-        // yep, regardless of visibility, we always export it
-        w.writeln(format!("export function {}$ (", rename(name)));
-        // write parameters
-        write_parameters(&func.signature, w, c, false)?;
-        // cache & typeTags
-        w.writeln("  $c: AptosDataCache,");
-        let num_tparams = func.signature.type_parameters.len();
-        let tpnames = if num_tparams == 0 {
-            "".to_string()
-        } else {
-            func.signature
-                .type_parameters
-                .iter()
-                .map(|tp| tp.user_specified_name.to_string())
-                .join(", ")
-        };
-        if num_tparams > 0 {
-            w.writeln(format!("  $p: TypeTag[], /* <{}>*/", tpnames));
-        }
-        // marks returnType or void
-        w.write("): ");
-        let ret_type_str = type_to_tstype(&func.signature.return_type, c)?;
-        w.write(ret_type_str);
-        w.write(" ");
 
-        // set current_function_signature as we enter body
-        c.current_function_signature = Some(func.signature.clone());
-        // add parameters to local frame
-        let mut param_names = BTreeSet::new();
-        for (name, _) in func.signature.parameters.iter() {
-            param_names.insert(name.to_string());
-        }
-        match &func.body.value {
-            FunctionBody_::Native => {
-                let mident = c.current_module.unwrap();
-                let native_name = format!(
-                    "return $.{}_{}_{}",
-                    format_address(mident.value.address),
-                    mident.value.module,
-                    name
-                );
-                let args = func
-                    .signature
-                    .parameters
-                    .iter()
-                    .map(|(n, _)| rename(&n.to_string()))
-                    .join(", ");
-                let args_comma = format!("{}{}", args, if args.is_empty() { "" } else { ", " });
-                let comma_tags = format!(
-                    "{}{}",
-                    if num_tparams == 0 { "" } else { ", " },
-                    if num_tparams == 0 {
-                        "".to_string()
-                    } else {
-                        format!(
-                            "[{}]",
-                            (0..num_tparams)
-                                .into_iter()
-                                .map(|u| format!("$p[{}]", u))
-                                .join(", ")
-                        )
-                    }
-                );
-                w.short_block(|w| {
-                    w.writeln(format!("{}({}$c{});", native_name, args_comma, comma_tags));
-                    Ok(())
-                })?;
+        if c.json {
+            w.writeln("{");
+            if c.config.test {
+                let is_test = check_test(name, func, c)?;
+                if is_test {
+                    w.writeln("  \"test\": true,");
+                }
             }
-            FunctionBody_::Defined { locals, body } => {
-                let new_vars = locals
-                    .key_cloned_iter()
-                    .map(|(name, _)| name)
-                    .filter(|name| !param_names.contains(&name.to_string()))
-                    .collect::<Vec<_>>();
-                write_func_body(body, &new_vars, w, c)?;
-            }
-        }
-        w.new_line();
-
-        if is_entry && script_function_has_valid_parameter(&func.signature) {
-            // TODO
-            // uses entry-func signature, which returns TransactionInfo{toPayload(), send(),
-            // sendAndWait()}
-            w.new_line();
             // yep, regardless of visibility, we always export it
-            w.writeln(format!("export function buildPayload_{} (", name));
+            w.writeln(format!("  \"name\": \"{}\",", rename(name)));
             // write parameters
-            write_parameters(&func.signature, w, c, true)?;
+            write_parameters_json(&func.signature, w, c, false)?;
             // typeTags
+            let num_tparams = func.signature.type_parameters.len();
+            let tpnames = if num_tparams == 0 {
+                "".to_string()
+            } else {
+                func.signature
+                    .type_parameters
+                    .iter()
+                    .map(|tp| tp.user_specified_name.to_string())
+                    .join("\", \"")
+            };
+            if num_tparams > 0 {
+                w.writeln(format!("  \"types\": [\"{}\"],", tpnames));
+            } else {
+                w.writeln("  \"types\": [],");
+            };
+            // marks returnType or void
+            let ret_type_str = type_to_tstype(&func.signature.return_type, c)?;
+            w.writeln(format!("  \"returnType\": \"{}\",", ret_type_str));
+            w.writeln("},");
+        } else {
+            if c.config.test {
+                let is_test = check_test(name, func, c)?;
+                if is_test {
+                    w.writeln("// #[test]");
+                }
+            }
+            // yep, regardless of visibility, we always export it
+            w.writeln(format!("export function {}$ (", rename(name)));
+            // write parameters
+            write_parameters(&func.signature, w, c, false)?;
+            // cache & typeTags
+            w.writeln("  $signer: any,");
+            let num_tparams = func.signature.type_parameters.len();
+            let tpnames = if num_tparams == 0 {
+                "".to_string()
+            } else {
+                func.signature
+                    .type_parameters
+                    .iter()
+                    .map(|tp| tp.user_specified_name.to_string())
+                    .join(", ")
+            };
             if num_tparams > 0 {
                 w.writeln(format!("  $p: TypeTag[], /* <{}>*/", tpnames));
             }
             // marks returnType or void
-            w.write(") ");
-            // body:
-            let params_no_signers = func
-                .signature
-                .parameters
-                .iter()
-                .filter(|(_n, ty)| !is_type_signer(ty))
-                .collect::<Vec<_>>();
-
-            w.short_block(|w| {
-                let mident = c.current_module.unwrap();
-                let address = format_address_hex(mident.value.address);
-                if num_tparams > 0 {
-                    w.writeln("const typeParamStrings = $p.map(t=>$.getTypeTagFullname(t));");
-                } else {
-                    w.writeln("const typeParamStrings = [] as string[];");
-                }
-                w.writeln("return $.buildPayload(");
-                // function_name
-                w.writeln(format!(
-                    "  \"{}::{}::{}\",",
-                    address, mident.value.module, name
-                ));
-                // type arguments
-                w.writeln("  typeParamStrings,");
-                // arguments
-                if params_no_signers.is_empty() {
-                    w.writeln("  []");
-                } else {
-                    w.writeln("  [");
-                    for (pname, ptype) in params_no_signers.iter() {
-                        w.writeln(format!(
-                            "    {},",
-                            get_ts_handler_for_script_function_param(pname, ptype)?,
-                        ));
-                    }
-                    w.writeln("  ]");
-                }
-                w.writeln(");");
-                Ok(())
-            })?;
+            w.write("): ");
+            let ret_type_str = type_to_tstype(&func.signature.return_type, c)?;
+            w.write(ret_type_str);
+            w.write(" ");
+            w.writeln("{");
+            w.writeln("  $signer(arguments);");
+            w.writeln("}");
             w.new_line();
 
-            handle_function_directives(name, func, w, c)?;
-        }
+            if is_entry && script_function_has_valid_parameter(&func.signature) {
+                // TODO
+                // uses entry-func signature, which returns TransactionInfo{toPayload(), send(),
+                // sendAndWait()}
+                w.new_line();
+                // yep, regardless of visibility, we always export it
+                w.writeln(format!("export function buildPayload_{} (", name));
+                // write parameters
+                write_parameters(&func.signature, w, c, true)?;
+                // typeTags
+                if num_tparams > 0 {
+                    w.writeln(format!("  $p: TypeTag[], /* <{}>*/", tpnames));
+                }
+                // marks returnType or void
+                w.write(") ");
+                // body:
+                let params_no_signers = func
+                    .signature
+                    .parameters
+                    .iter()
+                    .filter(|(_n, ty)| !is_type_signer(ty))
+                    .collect::<Vec<_>>();
 
-        c.current_function_signature = None;
+                w.short_block(|w| {
+                    let mident = c.current_module.unwrap();
+                    let address = format_address_hex(mident.value.address);
+                    if num_tparams > 0 {
+                        w.writeln("const typeParamStrings = $p.map(t=>$.getTypeTagFullname(t));");
+                    } else {
+                        w.writeln("const typeParamStrings = [] as string[];");
+                    }
+                    w.writeln("return $.buildPayload(");
+                    // function_name
+                    w.writeln(format!(
+                        "  \"{}::{}::{}\",",
+                        address, mident.value.module, name
+                    ));
+                    // type arguments
+                    w.writeln("  typeParamStrings,");
+                    // arguments
+                    if params_no_signers.is_empty() {
+                        w.writeln("  []");
+                    } else {
+                        w.writeln("  [");
+                        for (pname, ptype) in params_no_signers.iter() {
+                            w.writeln(format!(
+                                "    {},",
+                                get_ts_handler_for_script_function_param(pname, ptype)?,
+                            ));
+                        }
+                        w.writeln("  ]");
+                    }
+                    w.writeln(");");
+                    Ok(())
+                })?;
+                w.new_line();
+
+                handle_function_directives(name, func, w, c)?;
+            }
+
+            c.current_function_signature = None;
+        }
 
         Ok(())
     }
@@ -1092,43 +1111,6 @@ pub fn identify_declared_vars_in_block(block: &Block, undeclared: &mut BTreeSet<
     for stmt in block.iter() {
         identify_declared_vars_in_stmt(stmt, undeclared);
     }
-}
-
-pub fn write_func_body(
-    block: &Block,
-    new_vars: &Vec<Var>,
-    w: &mut TsgenWriter,
-    c: &mut Context,
-) -> WriteResult {
-    w.writeln("{");
-    w.increase_indent();
-
-    let mut declared_vars = BTreeSet::<String>::new();
-    identify_declared_vars_in_block(block, &mut declared_vars);
-
-    let undeclared = new_vars
-        .iter()
-        .filter(|var| !declared_vars.contains(&var.to_string()))
-        .collect::<Vec<_>>();
-
-    if undeclared.len() > 0 {
-        w.writeln(format!(
-            "let {};",
-            undeclared
-                .into_iter()
-                .map(|v| rename(&v.to_string()))
-                .join(", ")
-        ));
-    }
-
-    for stmt in block.iter() {
-        stmt.write_ts(w, c)?;
-    }
-
-    w.decrease_indent();
-    w.writeln("}");
-
-    Ok(())
 }
 
 impl AstTsPrinter for Block {

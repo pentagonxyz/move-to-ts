@@ -113,6 +113,7 @@ pub struct Context {
     pub all_shows: Vec<(ModuleIdent, StructName, StructDefinition, Name)>,
     // all show_iter_table directives collected
     pub all_shows_iter_tables: Vec<(ModuleIdent, StructName, StructDefinition, Name)>,
+    pub json: bool,
 }
 
 pub fn is_same_package(a1: Address, a2: Address) -> bool {
@@ -145,6 +146,7 @@ impl Context {
             module_shows: vec![],
             all_shows: vec![],
             all_shows_iter_tables: vec![],
+            json: false,
         }
     }
 
